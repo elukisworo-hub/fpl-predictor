@@ -12,7 +12,6 @@ import streamlit as st
 
 
 # ===== pengambilan data =====
-"""Pengambilan data dari API resmi Fantasy Premier League."""
 import json, os, time, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
@@ -77,12 +76,6 @@ def fetch_entry(team_id, gw):
     )
 
 # ===== model prediksi =====
-"""Model prediksi poin FPL (expected points / xP) berbasis komponen.
-
-Pakai:
-  python3 model.py <folder_data> backtest          -> uji model pada GW yang sudah lewat
-  python3 model.py <folder_data> build <out.json>  -> hasilkan data prediksi untuk web app
-"""
 import json, math, os, sys
 from collections import defaultdict
 
@@ -364,7 +357,6 @@ def build(bs, fx, hist, asof, out):
 
 
 # ===== optimasi =====
-"""Susunan terbaik, optimasi skuad (ILP), rencana transfer, dan saran chip."""
 import pulp
 
 QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}
@@ -682,6 +674,19 @@ def fx_text(i, g):
     return ", ".join(c.teams[o]["s"] if h else c.teams[o]["s"].lower() for o, h, *_ in fs) or "–"
 
 
+FDR_BG = {1: "#63c58c", 2: "#bfe8cf", 3: "#e3e7e5", 4: "#f6c2b2", 5: "#e8705c"}
+FDR_NAME = {1: "Mudah", 2: "Agak mudah", 3: "Sedang", 4: "Agak sulit", 5: "Sulit"}
+
+
+def fdr(i, g):
+    """Tingkat kesulitan laga 1 (mudah) sampai 5 (sulit), dari selisih gol harapan klub vs lawan. 0 = tidak ada laga."""
+    fs = c.teams[P[i]["t"]]["fx"][g]
+    if not fs:
+        return 0
+    d = sum(f[2] - f[3] for f in fs) / len(fs)
+    return 1 if d > .7 else 2 if d > .25 else 3 if d > -.25 else 4 if d > -.7 else 5
+
+
 def status(p):
     if p["st"] == "a":
         return "Fit"
@@ -809,13 +814,20 @@ with t_pred:
     df = pd.DataFrame([{
         "Pemain": P[i]["n"], "Klub": c.teams[P[i]["t"]]["s"], "Pos": POS[P[i]["p"]], "Harga": P[i]["c"] / 10,
         f"xP {RL}": round(sumxp(i), 2), "xP/£m": round(sumxp(i) / P[i]["c"] * 10, 2),
-        "Laga (huruf besar = kandang)": " · ".join(fx_text(i, g) for g in range(nfx)),
+        **{f"GW{D['gws'][g]['id']}": fx_text(i, g) for g in range(nfx)},
         "Dipilih %": P[i]["sel"], "Status": status(P[i])} for i in ids])
     if df.empty:
         st.info("Tidak ada pemain yang cocok dengan filter ini.")
     else:
         top = max(sumxp(i) for i in P) or 1
-        st.dataframe(df, hide_index=True, width="stretch", height=560, column_config={
+        sty = pd.DataFrame("", index=df.index, columns=df.columns)
+        for g in range(nfx):
+            sty[f"GW{D['gws'][g]['id']}"] = [f"background-color: {FDR_BG[k]}; color: #12211c; font-weight: 600" if k else "" for k in (fdr(i, g) for i in ids)]
+        st.markdown('<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:13px;margin-bottom:6px">Kesulitan laga: ' + "".join(
+            f'<span style="background:{FDR_BG[k]};color:#12211c;font-weight:600;border-radius:4px;padding:1px 8px">{FDR_NAME[k]}</span>' for k in range(1, 6))
+            + " · huruf besar = kandang, huruf kecil = tandang</div>", unsafe_allow_html=True)
+        st.dataframe(df.style.apply(lambda _: sty, axis=None), hide_index=True, width="stretch", height=560, column_config={
+            "xP/£m": st.column_config.NumberColumn(format="%.2f"),
             "Harga": st.column_config.NumberColumn(format="£%.1f"),
             f"xP {RL}": st.column_config.ProgressColumn(format="%.1f", min_value=0, max_value=float(top)),
             "Dipilih %": st.column_config.NumberColumn(format="%.1f%%")})
