@@ -740,6 +740,68 @@ def history(rows):
 
 
 # ---------- keadaan & bilah samping ----------
+def push_undo(what):
+    """Simpan skuad saat ini supaya perubahan besar bisa dibatalkan."""
+    ss = st.session_state
+    if "squad" in ss:
+        ss.setdefault("undo", []).append((list(ss["squad"]), ss.get("bank", 0.0), ss.get("ft", 1), ss.get("sample", False), what))
+        del ss["undo"][:-10]
+
+
+def undo():
+    ss = st.session_state
+    if ss.get("undo"):
+        ss["squad"], ss["bank"], ss["ft"], ss["sample"], _ = ss["undo"].pop()
+
+
+def undo_button(key):
+    if st.session_state.get("undo"):
+        st.button(f"↩ Batalkan: {st.session_state['undo'][-1][4]}", key=key, on_click=undo, width="stretch")
+
+
+def can_add(ids, i):
+    if i in ids:
+        return "sudah ada di skuad"
+    if len(ids) >= 15:
+        return "skuad sudah 15 pemain"
+    if sum(1 for j in ids if c.pos[j] == c.pos[i]) >= QUOTA[c.pos[i]]:
+        return f"kuota {POSN[c.pos[i]].lower()} sudah penuh"
+    if sum(1 for j in ids if c.team[j] == c.team[i]) >= 3:
+        return f"maksimal 3 pemain {c.teams[c.team[i]]['s']}"
+    return ""
+
+
+def add_player():
+    ss = st.session_state
+    i = ss.get("add_sel")
+    if i is None:
+        return
+    why = can_add(ss["squad"], i)
+    if why:
+        ss["sq_msg"] = f"{P[i]['n']} tidak bisa ditambahkan: {why}."
+    else:
+        ss["squad"] = ss["squad"] + [i]
+        ss["sample"] = False
+    ss["add_sel"] = None
+
+
+def remove_player(i):
+    ss = st.session_state
+    ss["squad"] = [j for j in ss["squad"] if j != i]
+    ss["sample"] = False
+
+
+def clear_squad():
+    push_undo("kosongkan skuad")
+    st.session_state.update(squad=[], sample=False)
+
+
+def auto_fill():
+    push_undo("isi otomatis")
+    ids = best_squad(VER, min(3, NG), 1000) or []
+    st.session_state.update(squad=ids, sample=False, bank=(1000 - sum(c.cost[i] for i in ids)) / 10)
+
+
 def do_import():
     tid = str(st.session_state.get("team_id", "")).strip()
     if not tid.isdigit():
@@ -749,24 +811,25 @@ def do_import():
     if not e:
         st.session_state["imp_msg"] = ("error", f"Tim dengan ID {tid} tidak ditemukan, atau FPL sedang tidak bisa dihubungi.")
         return
-    st.session_state["squad_sel"] = [i for i in e["ids"] if i in P]
+    push_undo("impor tim")
+    st.session_state["squad"] = [i for i in e["ids"] if i in P]
     st.session_state["bank"] = e["bank"] / 10
     st.session_state["sample"] = False
     st.query_params["team"] = tid
     st.session_state["imp_msg"] = ("success", f"Skuad {e['name']} per GW{e['gw']} dimuat. Transfer setelah deadline GW{e['gw']} belum ikut; sesuaikan di tab Tim Saya.")
 
 
-if "squad_sel" not in st.session_state:
+if "squad" not in st.session_state:
     st.session_state["bank"] = 0.0
     st.session_state["ft"] = 1
     qp = st.query_params.get("team")
     if qp and qp.isdigit():
         st.session_state["team_id"] = qp
         do_import()
-    if "squad_sel" not in st.session_state:
-        st.session_state["squad_sel"] = best_squad(VER, min(3, NG), 1000) or []
+    if "squad" not in st.session_state:
+        st.session_state["squad"] = best_squad(VER, min(3, NG), 1000) or []
         st.session_state["sample"] = True
-st.session_state["squad_sel"] = [i for i in st.session_state["squad_sel"] if i in P]
+st.session_state["squad"] = [i for i in st.session_state["squad"] if i in P]
 
 with st.sidebar:
     st.title("Prediksi Poin FPL")
@@ -885,35 +948,48 @@ with t_cmp:
 
 # ---------- Tim Saya ----------
 def apply_plan(ids, bank, ft):
-    st.session_state["squad_sel"], st.session_state["bank"], st.session_state["ft"] = ids, bank / 10, ft
+    push_undo(f"transfer GW{GW0}")
+    st.session_state["squad"], st.session_state["bank"], st.session_state["ft"] = ids, bank / 10, ft
     st.session_state["sample"] = False
 
 
 with t_team:
     if st.session_state.get("sample"):
-        st.info("Ini skuad contoh hasil optimasi £100m, bukan timmu. Impor timmu lewat ID tim di bilah samping, atau ganti pemainnya di kotak Skuad.")
-    left, right = st.columns([1.25, 1])
+        st.info("Ini skuad contoh hasil optimasi £100m, bukan timmu. Impor timmu lewat ID tim di bilah samping, atau ganti pemainnya di daftar Skuad.")
+    right, left = st.columns([1, 1.25])  # skuad dulu, supaya di ponsel muncul paling atas
     with right:
-        st.subheader("Skuad")
-        st.multiselect("15 pemain (ketik nama untuk mencari)", sorted(P, key=lambda i: P[i]["n"]), key="squad_sel", format_func=label,
-                       max_selections=15, on_change=lambda: st.session_state.update(sample=False))
-        squad = list(st.session_state["squad_sel"])
+        squad = list(st.session_state["squad"])
+        h1, h2, h3 = st.columns([1.2, 1, 1], vertical_alignment="bottom")
+        h1.subheader(f"Skuad {len(squad)}/15")
+        h2.button("Isi otomatis", on_click=auto_fill, width="stretch", help="Skuad terbaik £100m untuk 3 gameweek ke depan")
+        h3.button("Kosongkan", on_click=clear_squad, width="stretch")
+        undo_button("undo_right")
+        st.selectbox("Tambah pemain", [i for i in sorted(P, key=lambda i: -sumxp(i, NG)) if i not in squad], index=None, key="add_sel",
+                     format_func=label, placeholder="Tambah pemain: ketik nama…", label_visibility="collapsed", on_change=add_player)
+        if "sq_msg" in st.session_state:
+            st.warning(st.session_state.pop("sq_msg"))
+        for k in (1, 2, 3, 4):
+            grp = sorted((i for i in squad if c.pos[i] == k), key=lambda i: -sumxp(i))
+            st.markdown(f'<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;font-weight:600;opacity:.65;margin-top:6px">{POSN[k]} {len(grp)}/{QUOTA[k]}</div>', unsafe_allow_html=True)
+            if not grp:
+                st.caption("Belum ada. Cari nama di kotak di atas.")
+            for i in grp:
+                p = P[i]
+                flag = "" if p["st"] == "a" else f' <span style="font-size:11px;font-weight:600;border-radius:4px;padding:0 5px;background:rgba(220,60,50,.18);color:#d9534a" title="{html.escape(status(p))}">{"?" if p["ch"] is None else str(p["ch"]) + "%"}</span>'
+                row = st.container(horizontal=True, vertical_alignment="center", gap="small")
+                row.markdown(f'<div style="display:flex;align-items:center;gap:12px;border-top:1px solid rgba(128,128,128,.25);padding-top:6px"><div style="flex:1;min-width:0;line-height:1.25"><b>{html.escape(p["n"])}</b>{flag}<br>'
+                             f'<small style="opacity:.65">{c.teams[p["t"]]["s"]} · {POS[p["p"]]}</small></div><span>{money(p["c"])}</span>'
+                             f'<b style="min-width:36px;text-align:right" title="xP {RL}">{sumxp(i):.1f}</b></div>', unsafe_allow_html=True, width="stretch")
+                row.button("✕", key=f"rm_{i}", on_click=remove_player, args=(i,), type="tertiary", help=f"Keluarkan {p['n']}")
+        st.caption(f"Angka tebal adalah xP {RL}. Nilai skuad {money(sum(c.cost[i] for i in squad))}.")
         b1, b2 = st.columns(2)
         b1.number_input("Uang di bank (£m)", 0.0, 50.0, step=0.1, key="bank")
         b2.selectbox("Transfer gratis", [0, 1, 2, 3, 4, 5], key="ft")
         bank_t, ft = round(st.session_state["bank"] * 10), st.session_state["ft"]
         probs = squad_problems(c, squad)
-        for m in probs:
-            st.warning(m)
-        if squad:
-            sq = sorted(squad, key=lambda i: (P[i]["p"], -sumxp(i)))
-            st.dataframe(pd.DataFrame([{"Pemain": P[i]["n"], "Klub": c.teams[P[i]["t"]]["s"], "Pos": POS[P[i]["p"]], "Harga": P[i]["c"] / 10,
-                                        f"xP {RL}": round(sumxp(i), 1), "Status": status(P[i])} for i in sq]),
-                         hide_index=True, width="stretch", height=38 * 16,
-                         column_config={"Harga": st.column_config.NumberColumn(format="£%.1f")})
     with left:
         if not squad:
-            st.info("Skuad masih kosong. Impor tim lewat ID tim, atau pilih pemain di kotak Skuad.")
+            st.info("Skuad masih kosong. Impor tim lewat ID tim, atau cari pemain di kotak Tambah pemain.")
         else:
             st.subheader("Susunan terbaik")
             g = st.selectbox("Gameweek", range(NG), format_func=lambda k: f"GW{D['gws'][k]['id']}")
@@ -947,6 +1023,7 @@ with t_team:
                 w0 = pl["weeks"][0]
                 if w0["moves"]:
                     st.button(f"Terapkan transfer GW{GW0} ke skuad", on_click=apply_plan, args=(w0["ids"], w0["bank"], max(0, w0["ft_left"])))
+                undo_button("undo_plan")
                 with st.expander("Pilihan transfer tunggal lainnya"):
                     ideas = get_ideas(VER, tuple(squad), hz, bank_t)
                     if ideas:
@@ -972,7 +1049,8 @@ with t_team:
 
 # ---------- Skuad Terbaik ----------
 def use_best(ids, bank):
-    st.session_state["squad_sel"], st.session_state["bank"], st.session_state["sample"] = ids, bank / 10, False
+    push_undo("jadikan Tim Saya")
+    st.session_state["squad"], st.session_state["bank"], st.session_state["sample"] = ids, bank / 10, False
 
 
 with t_best:
