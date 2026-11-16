@@ -80,19 +80,32 @@ import json, math, os, sys
 from collections import defaultdict
 
 HORIZON = 6
-DECAY = 0.88          # bobot pertandingan lama (per pertandingan ke belakang)
-PRIOR_MIN = 450       # menit "prior" untuk menstabilkan xG/xA pemain bermenit sedikit
 POS = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
 DC_THRESHOLD = {2: 10, 3: 12, 4: 12}
+
+# Parameter hasil penyetelan lewat uji mundur berjalan (walk-forward) musim ini.
+# stat: (menit prior pemain sekelas, bobot data musim lalu, pengali kalibrasi)
+RATE = {"xg": (450, 0.6, 0.90), "xa": (2500, 0.3, 1.12), "bo": (2500, 0.6, 1.04), "sv": (800, 0.3, 1.03), "card": (1400, 1.0, 1.13)}
+XG_BLEND, XA_BLEND = 0.8, 0.6   # porsi xG/xA terhadap gol/assist nyata
+PAST_CAP = 2000                 # menit musim lalu yang dihitung paling banyak
+TEAM_K, TEAM_XG = 8, 0.7        # penarikan kekuatan tim ke rata-rata liga; porsi xG
+LAM_SCALE = 0.92                # gol nyata lebih sedikit daripada campuran xG
+# peluang main / 60+ menit / menit: konstanta, 3 atau 5 laga terakhir, sepanjang musim, laga terakhir
+PLAY_C, P60_C, MIN_C = (0.217, 0.211, 0.129, 0.359), (0.098, 0.059, 0.318, 0.414), (6.24, 0.018, 0.298, 0.528)
 
 
 def load(folder):
     bs = json.load(open(os.path.join(folder, "bs.json")))
     fx = json.load(open(os.path.join(folder, "fx.json")))
-    hist = {}
+    hist, past = {}, {}
     for e in bs["elements"]:
         p = os.path.join(folder, "el", f"{e['id']}.json")
-        hist[e["id"]] = json.load(open(p))["history"] if os.path.exists(p) else []
+        d = json.load(open(p)) if os.path.exists(p) else {}
+        hist[e["id"]] = d.get("history", [])
+        hp = d.get("history_past") or []
+        if hp and hp[-1]["minutes"] >= 270:
+            past[e["id"]] = hp[-1]   # musim terakhir sebelum musim ini
+    bs["_past"] = past
     return bs, fx, hist
 
 
@@ -118,15 +131,15 @@ def team_model(fx, hist, asof):
     games = []  # (home, away, g_home, g_away)
     for f in fx:
         if f["event"] and f["event"] <= asof and f["finished"]:
-            gh = 0.7 * xg[(f["id"], f["team_h"])] + 0.3 * f["team_h_score"]
-            ga = 0.7 * xg[(f["id"], f["team_a"])] + 0.3 * f["team_a_score"]
+            gh = TEAM_XG * xg[(f["id"], f["team_h"])] + (1 - TEAM_XG) * f["team_h_score"]
+            ga = TEAM_XG * xg[(f["id"], f["team_a"])] + (1 - TEAM_XG) * f["team_a_score"]
             games.append((f["team_h"], f["team_a"], gh, ga))
     teams = sorted({t for g in games for t in g[:2]})
     mu = sum(g[2] + g[3] for g in games) / (2 * len(games))
     hf = math.sqrt(sum(g[2] for g in games) / max(1e-9, sum(g[3] for g in games)))
     hf = 1 + (hf - 1) * 0.7
     att = {t: 1.0 for t in teams}; dfn = {t: 1.0 for t in teams}
-    K = 4  # pertandingan prior di rata-rata liga
+    K = TEAM_K
     for _ in range(30):
         na, nd = {}, {}
         for t in teams:
@@ -143,62 +156,90 @@ def team_model(fx, hist, asof):
 
 
 def lam(tm, team, opp, home):
+    """Gol harapan tim melawan lawan ini."""
     mu, hf, att, dfn = tm
-    return mu * (hf if home else 1 / hf) * att.get(team, 1) * dfn.get(opp, 1)
+    return LAM_SCALE * mu * (hf if home else 1 / hf) * att.get(team, 1) * dfn.get(opp, 1)
+
+
+def _stat(h, k):
+    if k == "xg":
+        return XG_BLEND * float(h["expected_goals"]) + (1 - XG_BLEND) * h["goals_scored"]
+    if k == "xa":
+        return XA_BLEND * float(h["expected_assists"]) + (1 - XA_BLEND) * h["assists"]
+    if k == "bo":
+        return h["bonus"]
+    if k == "sv":
+        return h["saves"]
+    return h["yellow_cards"] + 3 * h["red_cards"]
 
 
 def player_rates(bs, fx, hist, asof):
-    """Rate per-90 tiap pemain (berbobot ke pertandingan terbaru) + proyeksi menit."""
+    """Rate per-90 tiap pemain (musim ini + musim lalu + pemain sekelas) dan proyeksi menit."""
+    past = bs.get("_past", {})
     team_rounds = defaultdict(list)  # team -> daftar fixture id selesai, urut waktu
     for f in sorted(fx, key=lambda f: f["kickoff_time"] or ""):
         if f["event"] and f["event"] <= asof and f["finished"]:
             team_rounds[f["team_h"]].append(f["id"]); team_rounds[f["team_a"]].append(f["id"])
     raw = {}
+    clip = lambda v, hi=1.0: max(0.0, min(hi, v))
     for e in bs["elements"]:
         hs = [h for h in hist[e["id"]] if h["round"] <= asof]
-        hs.sort(key=lambda h: h["kickoff_time"])
-        n = len(hs)
         acc = defaultdict(float)
         dc_hit = dc_n = 0.0
-        for i, h in enumerate(hs):
-            w = DECAY ** (n - 1 - i)
+        for h in hs:
             m = h["minutes"]
-            acc["min"] += w * m
-            acc["xg"] += w * (0.8 * float(h["expected_goals"]) + 0.2 * h["goals_scored"])
-            acc["xa"] += w * (0.8 * float(h["expected_assists"]) + 0.2 * h["assists"])
-            acc["sv"] += w * h["saves"]; acc["bo"] += w * h["bonus"]
-            acc["card"] += w * (h["yellow_cards"] + 3 * h["red_cards"])
+            acc["min"] += m
+            for k in RATE:
+                acc[k] += _stat(h, k)
             if m >= 60 and e["element_type"] in DC_THRESHOLD:
-                dc_n += w; dc_hit += w * (h["defensive_contribution"] >= DC_THRESHOLD[e["element_type"]])
-        # menit: 5 laga terakhir tim SAAT INI (laga tanpa main = 0)
+                dc_n += 1; dc_hit += h["defensive_contribution"] >= DC_THRESHOLD[e["element_type"]]
+        # menit: laga tim SAAT INI, terbaru dulu (laga tanpa main = 0)
         by_fx = {h["fixture"]: h["minutes"] for h in hs}
-        last = team_rounds[e["team"]][-5:][::-1]
-        wts = [0.30, 0.25, 0.20, 0.15, 0.10][: len(last)]
-        sw = sum(wts) or 1
-        mins = [by_fx.get(f, 0) for f in last]
-        raw[e["id"]] = dict(
-            acc=acc, dc_hit=dc_hit, dc_n=dc_n,
-            emin=sum(w * m for w, m in zip(wts, mins)) / sw,
-            pplay=sum(w * (m > 0) for w, m in zip(wts, mins)) / sw,
-            p60=sum(w * (m >= 60) for w, m in zip(wts, mins)) / sw,
-        )
-    # prior per posisi & kisaran harga
+        allm = [by_fx.get(f, 0) for f in team_rounds[e["team"]]][::-1]
+        if allm:
+            l5 = allm[:5]; wts = [0.30, 0.25, 0.20, 0.15, 0.10][: len(l5)]; sw = sum(wts)
+            avg = lambda fn, arr: sum(fn(m) for m in arr) / len(arr)
+            pl = lambda m: m > 0
+            s60 = lambda m: m >= 60
+            f_pl = (avg(pl, allm[:3]), avg(pl, allm), float(allm[0] > 0))
+            f_60 = (sum(w * s60(m) for w, m in zip(wts, l5)) / sw, avg(s60, allm), float(allm[0] >= 60))
+            f_mn = (sum(w * m for w, m in zip(wts, l5)) / sw, avg(float, allm), float(allm[0]))
+        else:
+            f_pl = f_60 = f_mn = (0.0, 0.0, 0.0)
+        est = lambda c, f: c[0] + c[1] * f[0] + c[2] * f[1] + c[3] * f[2]
+        fit = lambda c, f: c[0] + (c[1] + c[2] + c[3]) * f[1]      # "kalau fit": hanya rata-rata musim
+        never = acc["min"] == 0
+        mins = {}
+        for tag, fn in (("", est), ("_fit", fit)):
+            p60 = 0.0 if never else clip(fn(P60_C, f_60))
+            mins["p60" + tag] = p60
+            mins["pplay" + tag] = 0.0 if never else clip(max(fn(PLAY_C, f_pl), p60 + 0.02))
+            mins["emin" + tag] = 0.0 if never else clip(fn(MIN_C, f_mn), 90.0)
+        raw[e["id"]] = dict(acc=acc, dc_hit=dc_hit, dc_n=dc_n, **mins)
+    # prior: pemain sekelas (posisi & kisaran harga) + musim lalu
     rates = {}
     els = bs["elements"]
+    peer_cache = {}
     for e in els:
         r = raw[e["id"]]; a = r["acc"]
-        peers = [raw[o["id"]]["acc"] for o in els
-                 if o["element_type"] == e["element_type"] and abs(o["now_cost"] - e["now_cost"]) <= 10]
-        pm = sum(p["min"] for p in peers) or 1
-        def shr(key, prior_min=PRIOR_MIN):
-            prior = sum(p[key] for p in peers) / pm
-            return (a[key] + prior * prior_min) / (a["min"] + prior_min) * 90
+        ck = (e["element_type"], e["now_cost"])
+        if ck not in peer_cache:
+            peers = [raw[o["id"]]["acc"] for o in els
+                     if o["element_type"] == e["element_type"] and abs(o["now_cost"] - e["now_cost"]) <= 10]
+            pm = sum(p["min"] for p in peers) or 1
+            peer_cache[ck] = {k: sum(p[k] for p in peers) / pm for k in RATE}
+        pp = past.get(e["id"])
+        out = {}
+        for k, (prior_min, past_w, scale) in RATE.items():
+            wp = past_w * min(pp["minutes"], PAST_CAP) if pp else 0
+            pr = _stat(pp, k) / pp["minutes"] if pp else 0
+            out[k] = scale * (a[k] + peer_cache[ck][k] * prior_min + pr * wp) / (a["min"] + prior_min + wp) * 90
         pos_dc = [raw[o["id"]] for o in els if o["element_type"] == e["element_type"]]
         dcp = sum(p["dc_hit"] for p in pos_dc) / (sum(p["dc_n"] for p in pos_dc) or 1)
         rates[e["id"]] = dict(
-            xg90=shr("xg"), xa90=shr("xa"), sv90=shr("sv", 180), bo90=shr("bo"), card90=shr("card"),
+            xg90=out["xg"], xa90=out["xa"], sv90=out["sv"], bo90=out["bo"], card90=out["card"],
             pdc=(r["dc_hit"] + dcp * 3) / (r["dc_n"] + 3),
-            emin=r["emin"], pplay=r["pplay"], p60=r["p60"],
+            **{k: r[k] for k in ("emin", "pplay", "p60", "emin_fit", "pplay_fit", "p60_fit")},
         )
     return rates
 
@@ -217,12 +258,24 @@ def availability(e, k):
     return c + (1 - c) * min(1, 0.3 * k)
 
 
-def fixture_xp(e, r, tm, sc, team, opp, home, avail=1.0):
+def minutes_for(e, r, k, use_avail):
+    """(menit, peluang main, peluang 60+) untuk GW ke-k dari sekarang.
+
+    Tanpa kabar dari FPL, absen di laga terakhir dihitung sebagai risiko yang memudar dalam dua pekan.
+    Kalau FPL memberi peluang main, risikonya sudah ada di angka itu, jadi dipakai proyeksi "kalau fit".
+    """
+    flagged = use_avail and e.get("chance_of_playing_next_round") is not None
+    w = 0.0 if flagged else max(0.0, 1 - 0.5 * k)
+    av = availability(e, k) if use_avail else 1.0
+    mix = lambda key: (w * r[key] + (1 - w) * r[key + "_fit"]) * av
+    return mix("emin"), mix("pplay"), mix("p60")
+
+
+def fixture_xp(e, r, tm, sc, team, opp, home, mins, pplay, p60):
     pos = POS[e["element_type"]]
-    lf, la = lam(tm, team, opp, home), lam(tm, opp, team, not home)
+    la = lam(tm, opp, team, not home)
     mu, hf, att, dfn = tm
-    atk = lf / (mu * att.get(team, 1))  # pengali kemudahan lawan terhadap rata-rata tim
-    mins = r["emin"] * avail; pplay = r["pplay"] * avail; p60 = r["p60"] * avail
+    atk = (hf if home else 1 / hf) * dfn.get(opp, 1)  # pengali kemudahan lawan terhadap rata-rata tim
     m90 = mins / 90
     out = {}
     out["main"] = pplay * sc["short_play"] + p60 * (sc["long_play"] - sc["short_play"])
@@ -234,7 +287,7 @@ def fixture_xp(e, r, tm, sc, team, opp, home, avail=1.0):
         mplay = mins / pplay if pplay > 0 else 0
         other -= pplay * pois_floor_half(la * mplay / 90)
     if pos == "GKP":
-        sv = r["sv90"] * m90 * math.sqrt(la / mu)
+        sv = r["sv90"] * m90 * math.sqrt(la / (LAM_SCALE * mu))
         other += max(0.0, sv / 3 - 0.3 * pplay)
     else:
         other += sc["defensive_contribution"][pos] * r["pdc"] * p60
@@ -257,10 +310,10 @@ def predict(bs, fx, hist, asof, n_gw=HORIZON, use_avail=True):
         r = rates[e["id"]]; per_gw = []
         for k in range(n_gw):
             gw = asof + 1 + k
-            av = availability(e, k) if use_avail else 1.0
+            mins, pplay, p60 = minutes_for(e, r, k, use_avail)
             comp = defaultdict(float)
             for opp, home in by_team[e["team"]][gw]:
-                for key, v in fixture_xp(e, r, tm, sc, e["team"], opp, home, av).items():
+                for key, v in fixture_xp(e, r, tm, sc, e["team"], opp, home, mins, pplay, p60).items():
                     comp[key] += v
             per_gw.append(dict(comp) if comp else {"xp": 0.0})
         preds[e["id"]] = per_gw
@@ -1089,10 +1142,12 @@ with t_how:
     st.markdown("""
 xP (expected points) adalah perkiraan rata-rata poin FPL seorang pemain di satu gameweek, dijumlahkan dari beberapa komponen memakai aturan skor resmi musim ini:
 
-- **Main** — peluang tampil dan peluang bermain 60+ menit, dari menit di lima laga terakhir klubnya, dikalikan peluang fit dari kabar cedera FPL.
-- **Gol dan assist** — xG dan xA per 90 menit (laga terbaru berbobot lebih besar, pemain bermenit sedikit ditarik ke rata-rata pemain sekelas harganya), dikali seberapa mudah lawannya dibobol.
+- **Main** — peluang tampil dan peluang bermain 60+ menit, dari tiga hal: apakah ia main di laga terakhir, beberapa laga terakhir, dan rata-rata sepanjang musim. Pemain inti pun tidak dianggap pasti main. Kalau FPL memberi kabar cedera, peluang main dari FPL yang dipakai.
+- **Gol dan assist** — xG dan xA per 90 menit dari musim ini, digabung dengan data musim lalu dan rata-rata pemain sekelas harganya supaya tidak terkecoh performa sesaat, lalu dikali seberapa mudah lawannya dibobol.
 - **Clean sheet** — peluang lawan tidak mencetak gol, dari kekuatan serang lawan dan pertahanan klub sendiri.
 - **Lain-lain** — bonus, penyelamatan kiper, kontribusi bertahan, dikurangi kebobolan dan kartu.
+
+Semua bobot di atas disetel dengan uji mundur pada musim ini: tiap gameweek diprediksi hanya dengan data sebelum gameweek itu, lalu dipilih setelan yang paling dekat dengan hasil sebenarnya.
 
 Kekuatan tiap klub dihitung dari gol dan xG semua laga yang sudah selesai, disesuaikan dengan lawan yang dihadapi dan faktor kandang.
 """)
