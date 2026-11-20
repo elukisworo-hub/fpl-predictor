@@ -1,0 +1,11 @@
+{
+  "name": "Petualangan Angka",
+  "short_name": "Petualangan Angka",
+  "description": "Belajar Berhitung, Sambil Berpetualang!",
+  "start_url": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#7FD3FF",
+  "theme_color": "#7FD3FF",
+  "icons": [{ "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
