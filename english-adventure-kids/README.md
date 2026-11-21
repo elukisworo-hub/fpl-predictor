@@ -19,6 +19,12 @@ npm run build
 npm run preview
 ```
 
+### Terbit otomatis ke GitHub Pages
+
+Workflow `.github/workflows/deploy-kids-app.yml` menguji, mem-build, dan menerbitkan aplikasi setiap ada perubahan di folder ini pada branch `main`. Alamatnya: `https://elukisworo-hub.github.io/fpl-predictor/`.
+
+Pengaturan sekali saja: di GitHub buka **Settings → Pages → Build and deployment → Source**, lalu pilih **GitHub Actions**. Workflow juga bisa dijalankan manual dari tab **Actions** (tombol *Run workflow*).
+
 Pengujian:
 
 ```bash
