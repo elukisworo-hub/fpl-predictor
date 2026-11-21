@@ -9,24 +9,26 @@ export type Route =
   | { name: 'badges' }
   | { name: 'parent' };
 
+/**
+ * Hash format is a single plain name (`#world-w1`, `#stage-w1-s1`, `#review`),
+ * which works both on normal hosting and inside embedded viewers that only
+ * pass simple `#name` hashes. Older `#/stage/w1-s1` links are still accepted.
+ */
 export function parseHash(hash: string): Route {
-  const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-  switch (parts[0]) {
-    case 'world': return parts[1] ? { name: 'world', worldId: parts[1] } : { name: 'home' };
-    case 'stage': return parts[1] ? { name: 'stage', stageId: parts[1] } : { name: 'home' };
-    case 'review': return { name: 'review' };
-    case 'badges': return { name: 'badges' };
-    case 'parent': return { name: 'parent' };
-    default: return { name: 'home' };
-  }
+  const h = hash.replace(/^#\/?/, '').replace(/\//g, '-');
+  let m: RegExpMatchArray | null;
+  if ((m = h.match(/^world-(w\d+)$/))) return { name: 'world', worldId: m[1] };
+  if ((m = h.match(/^stage-(w\d+-s\d+)$/))) return { name: 'stage', stageId: m[1] };
+  if (h === 'review' || h === 'badges' || h === 'parent') return { name: h };
+  return { name: 'home' };
 }
 
 export function toHash(r: Route): string {
   switch (r.name) {
-    case 'home': return '#/';
-    case 'world': return `#/world/${r.worldId}`;
-    case 'stage': return `#/stage/${r.stageId}`;
-    default: return `#/${r.name}`;
+    case 'home': return '#home';
+    case 'world': return `#world-${r.worldId}`;
+    case 'stage': return `#stage-${r.stageId}`;
+    default: return `#${r.name}`;
   }
 }
 

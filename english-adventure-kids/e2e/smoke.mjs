@@ -139,7 +139,7 @@ try {
   check(Object.keys(saved.words).length >= 10, `word stats saved (${Object.keys(saved.words).length} words)`);
 
   // Locked stage via URL is refused
-  await page.goto(`${BASE}#/stage/w5-s1`);
+  await page.goto(`${BASE}#stage-w5-s1`);
   await sleep(400);
   check(!(await page.locator('[data-testid=next]').isVisible()), 'locked stage cannot be opened via URL');
 
@@ -183,7 +183,7 @@ try {
   await page.evaluate((s) => localStorage.setItem('eak.progress.v1', s), JSON.stringify(unlockedAll));
   const tour = { 'w2-s1': 'colour', 'w2-s4': 'shapes', 'w3-s3': 'spelling', 'w3-s6': 'story', 'w4-s1': 'counting', 'w6-s3': 'speaking stage', 'w6-s5': 'Q&A dialogue', 'w7-s1': 'instructions', 'w8-s5': 'actions', 'w10-s5': 'prepositions', 'w10-s7': 'final boss' };
   for (const [id, what] of Object.entries(tour)) {
-    await page.goto(`${BASE}#/stage/${id}`);
+    await page.goto(`${BASE}#stage-${id}`);
     await page.reload();
     check(await playStage(page, { mistakes: id.endsWith('1') }), `${id} (${what}) can be completed`);
     if (id === 'w3-s3') await page.screenshot({ path: `${SHOTS}10-after-spell.png` });

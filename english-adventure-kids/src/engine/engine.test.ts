@@ -226,3 +226,13 @@ describe('speech matching', () => {
     expect(speechMatches('dog', ['banana'])).toBe(false);
   });
 });
+
+import { parseHash, toHash } from '../router';
+describe('router', () => {
+  it('round-trips simple hashes and accepts old links', () => {
+    for (const r of [{ name: 'home' }, { name: 'world', worldId: 'w3' }, { name: 'stage', stageId: 'w10-s7' }, { name: 'review' }, { name: 'parent' }] as const)
+      expect(parseHash(toHash(r))).toEqual(r);
+    expect(parseHash('#/stage/w1-s2')).toEqual({ name: 'stage', stageId: 'w1-s2' });
+    expect(toHash({ name: 'stage', stageId: 'w1-s2' })).toMatch(/^#[A-Za-z0-9-]+$/);
+  });
+});
