@@ -1,0 +1,70 @@
+@import '@fontsource/fredoka/400.css';
+@import '@fontsource/fredoka/500.css';
+@import '@fontsource/fredoka/600.css';
+@import '@fontsource/fredoka/700.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: 'Fredoka', ui-rounded, system-ui, sans-serif;
+  color: #3c3c3c;
+  background: linear-gradient(180deg, #d9f2ff 0%, #f0faff 45%, #fff8e7 100%);
+  background-attachment: fixed;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  overscroll-behavior: none;
+}
+
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.emoji {
+  font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
+  line-height: 1;
+}
+
+@layer components {
+  .btn {
+    @apply relative inline-flex items-center justify-center gap-2 rounded-2xl px-6 py-3 font-semibold text-white
+      transition-transform duration-75 active:translate-y-1 disabled:opacity-50 disabled:active:translate-y-0;
+    border-bottom-width: 5px;
+  }
+  .btn-green { @apply bg-grass border-grassdark; }
+  .btn-blue { @apply bg-ocean border-oceandark; }
+  .btn-orange { @apply bg-tangerine border-[#cc7800]; }
+  .btn-pink { @apply bg-berry border-[#d63a72]; }
+  .btn-purple { @apply bg-grape border-[#8445c2]; }
+  .btn-white { @apply bg-white text-ink border-slate-200; }
+  .card { @apply rounded-3xl bg-white shadow-chunky; }
+  .tile {
+    @apply flex items-center justify-center rounded-3xl border-4 border-slate-200 bg-white shadow-chunkysm
+      transition-all duration-150 active:scale-95;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
